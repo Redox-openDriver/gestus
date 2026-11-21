@@ -15,12 +15,19 @@ pub(crate) const PERIOD: u64 = 8_000;
 const DECIDE: f32 = 1.5;
 const STROKE_STEP: f32 = 0.3;
 const STROKE_LIMIT: usize = 2048;
-const COVER_DRIFT: f32 = 5.0;
+const COVER_DRIFT: f32 = 20.0;
+const COVER_LANDING: u64 = 150_000;
+const COVER_QUIET: u64 = 1_000_000;
+const COVER_MARGIN: f32 = 8.0;
 const ROTATE_SCROLL: f32 = 0.25;
 const TWO_HANDS: u64 = 400_000;
 const REVERSALS: usize = 8;
-const LEAST_COVER: u8 = 2;
 const SETTLED: u64 = 50_000;
+const TWIST_DECIDE: f32 = 5.0;
+const TWIST_GIVE_UP: f32 = 10.0;
+const PIVOT_MOVE: f32 = 0.5;
+const ROTATE_START: f32 = 10.0;
+const PINCH_START: f32 = 3.0;
 const GATHER: u64 = 250_000;
 const FLUNG: f32 = 5.0;
 
@@ -64,6 +71,7 @@ struct Sequence {
     origin: (f32, f32),
     claimed: bool,
     hidden: bool,
+    palmed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,16 +129,17 @@ struct Anchor {
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 struct Shaking {
     leg: f32,
+    across: f32,
     sign: i8,
     reversals: [u64; REVERSALS],
     count: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct Covering {
-    since: u64,
-    contacts: usize,
-    centre: (f32, f32),
+enum Covering {
+    Holding { since: u64, id: u8, at: (f32, f32) },
+    Covered,
+    Spoiled,
 }
 
 pub struct Gestures {
@@ -169,6 +178,7 @@ pub struct Gestures {
     anchor: Option<Anchor>,
     shaking: Shaking,
     covering: Option<Covering>,
+    touched: u64,
     filters: Vec<(u8, OneEuro, OneEuro)>,
     typed: Option<u64>,
 }
@@ -258,6 +268,7 @@ impl Gestures {
             anchor: None,
             shaking: Shaking::default(),
             covering: None,
+            touched: 0,
             filters: Vec::new(),
             typed: None,
         }
@@ -297,13 +308,11 @@ impl Gestures {
     }
 
     pub fn typed(&mut self, time: u64) {
-        if self.config.typing.enabled {
-            self.typed = Some(time);
-        }
+        self.typed = Some(time);
     }
 
     fn typing(&self, time: u64) -> bool {
-        !self.native && self.typed.is_some_and(|at| time.saturating_sub(at) < self.config.typing.quiet)
+        self.config.typing.enabled && !self.native && self.typed.is_some_and(|at| time.saturating_sub(at) < self.config.typing.quiet)
     }
 
     pub fn deadline(&self) -> Option<u64> {
@@ -422,12 +431,16 @@ impl Gestures {
     fn track(&mut self, touches: &[Touch], time: u64) -> (Vec<(u8, f32, f32)>, bool, bool) {
         let mut next: Vec<Finger> = Vec::with_capacity(touches.len());
         let mut moves: Vec<(u8, f32, f32)> = Vec::with_capacity(touches.len());
-        let (mut touched, mut joined) = (false, false);
+        let (mut touched, mut joined, mut palmed) = (false, false, false);
+        if self.fingers.is_empty() {
+            self.touched = time;
+        }
         for touch in touches {
             let finger = match self.fingers.iter().find(|finger| finger.id == touch.id) {
                 Some(previous) => {
                     let (dx, dy) = (touch.x - previous.x, touch.y - previous.y);
                     moves.push((touch.id, dx, dy));
+                    palmed |= touch.palm && !previous.palm;
                     let mut moved =
                         Finger { x: touch.x, y: touch.y, travelled: previous.travelled + distance(dx, dy), palm: previous.palm || touch.palm, ..*previous };
                     moved.edge &= moved.displacement() < self.config.pointer.edge_release;
@@ -452,6 +465,9 @@ impl Gestures {
             next.push(finger);
         }
         self.fingers = next;
+        if palmed && let Some(sequence) = self.sequence.as_mut() {
+            sequence.palmed = true;
+        }
         (moves, touched, joined)
     }
 
@@ -466,8 +482,16 @@ impl Gestures {
         let starting = self.sequence.is_none() && !fingers.is_empty();
         if !fingers.is_empty() {
             let origin = (fingers[0].x, fingers[0].y);
-            let sequence =
-                self.sequence.get_or_insert(Sequence { started: time, most: 0, travelled: 0.0, clicked: false, origin, claimed: false, hidden: false });
+            let sequence = self.sequence.get_or_insert(Sequence {
+                started: time,
+                most: 0,
+                travelled: 0.0,
+                clicked: false,
+                origin,
+                claimed: false,
+                hidden: false,
+                palmed: false,
+            });
             sequence.most = sequence.most.max(working.len().max(1) as u8);
             sequence.travelled = working.iter().fold(sequence.travelled, |most, finger| most.max(finger.travelled));
             if self.fling.is_some_and(|fling| time.saturating_sub(fling.ended) > LIFT_GRACE) {
@@ -555,8 +579,12 @@ impl Gestures {
     }
 
     fn begin(&mut self, fingers: &[Finger], time: u64, out: &mut Vec<Event>) {
+        if self.covering == Some(Covering::Covered) {
+            self.claim = Claim::Consumed;
+            self.mark_claimed();
+            return;
+        }
         self.claim = Claim::None;
-        self.covering = None;
         self.anchor = None;
         self.shaking = Shaking::default();
         let first = fingers[0];
@@ -905,35 +933,57 @@ impl Gestures {
                 }
                 let [a, b] = self.split;
                 let (first, second) = (distance(a.0, a.1), distance(b.0, b.1));
-                if first.max(second) >= self.config.pointer.scroll_start {
+                let most = first.max(second);
+                let twisting = self.config.rotate.enabled || self.config.pinch.enabled;
+                if most >= self.config.pointer.scroll_start {
                     let both = first.min(second) >= self.config.pointer.follow;
                     if both && a.0 * b.0 + a.1 * b.1 > 0.0 {
                         self.enter(Mode::Scroll, time);
                         self.scroll(((a.0 + b.0) / 2.0, (a.1 + b.1) / 2.0), elapsed, time, out);
-                    } else if both && (self.config.rotate.enabled || self.config.pinch.enabled) {
-                        self.twist_or_pinch(working, a, b, time, out);
-                    } else {
+                    } else if !twisting {
                         self.enter(Mode::Pointer, time);
                         let split = self.split;
                         self.point(largest(&split), elapsed, time, factor, out);
+                    } else {
+                        let resting = most >= TWIST_DECIDE && first.min(second) < PIVOT_MOVE;
+                        match self.twist(working, a, b) {
+                            Some(mode @ Mode::Rotate { .. }) if !resting => {
+                                self.mode = mode;
+                                self.rotate(working, time, out);
+                            }
+                            Some(mode) if !resting => {
+                                self.mode = mode;
+                                self.pinch(working, time, out);
+                            }
+                            _ if resting || most >= TWIST_GIVE_UP => {
+                                self.enter(Mode::Pointer, time);
+                                let split = self.split;
+                                self.point(largest(&split), 0, time, factor, out);
+                            }
+                            _ => {}
+                        }
                     }
                 }
             }
         }
     }
 
-    fn twist_or_pinch(&mut self, working: &[Finger], a: (f32, f32), b: (f32, f32), time: u64, out: &mut Vec<Event>) {
+    fn twist(&self, working: &[Finger], a: (f32, f32), b: (f32, f32)) -> Option<Mode> {
+        if distance(a.0, a.1).min(distance(b.0, b.1)) < PIVOT_MOVE {
+            return None;
+        }
         let (p, q) = (working[0], working[1]);
         let now = (q.x - p.x, q.y - p.y);
         let then = (now.0 - (b.0 - a.0), now.1 - (b.1 - a.1));
         let spread = distance(now.0, now.1) - distance(then.0, then.1);
-        let arc = turn(direction(then.0, then.1), direction(now.0, now.1)).abs() * distance(now.0, now.1) / 2.0;
-        if self.config.pinch.enabled && (!self.config.rotate.enabled || spread.abs() >= arc) {
-            self.mode = Mode::Pinch { last: distance(then.0, then.1), spread: 0.0 };
-            self.pinch(working, time, out);
+        let twist = turn(direction(then.0, then.1), direction(now.0, now.1));
+        let arc = twist.abs() * distance(now.0, now.1) / 2.0;
+        if self.config.rotate.enabled && degrees(twist.abs()) >= ROTATE_START && arc >= spread.abs() {
+            Some(Mode::Rotate { last: direction(then.0, then.1), turned: 0.0 })
+        } else if self.config.pinch.enabled && spread.abs() >= PINCH_START && spread.abs() > arc {
+            Some(Mode::Pinch { last: distance(then.0, then.1), spread: 0.0 })
         } else {
-            self.mode = Mode::Rotate { last: direction(then.0, then.1), turned: 0.0 };
-            self.rotate(working, time, out);
+            None
         }
     }
 
@@ -1062,9 +1112,10 @@ impl Gestures {
         let shaking = &mut self.shaking;
         if sign == shaking.sign {
             shaking.leg += step.0.abs();
+            shaking.across += step.1.abs();
             return;
         }
-        if shaking.leg >= shake.amplitude {
+        if shaking.leg >= shake.amplitude && shaking.leg >= 2.0 * shaking.across {
             if shaking.count == REVERSALS {
                 shaking.reversals.copy_within(1.., 0);
                 shaking.count -= 1;
@@ -1074,6 +1125,7 @@ impl Gestures {
         }
         shaking.sign = sign;
         shaking.leg = step.0.abs();
+        shaking.across = step.1.abs();
         let recent = shaking.reversals[..shaking.count].iter().filter(|at| time.saturating_sub(**at) <= shake.window).count();
         if recent >= usize::from(shake.turns.max(1)) {
             *shaking = Shaking::default();
@@ -1182,7 +1234,9 @@ impl Gestures {
             let s = &self.config.pointer;
             let limit = if sequence.most > 1 { s.multi_tap_time } else { s.tap_time };
             let quick = time.saturating_sub(sequence.started) <= limit;
-            let still = quick && !sequence.clicked && sequence.travelled <= s.tap_travel && self.held.is_none() && !sequence.claimed;
+            let covering = matches!(self.covering, Some(Covering::Holding { .. }));
+            let still =
+                quick && !sequence.clicked && sequence.travelled <= s.tap_travel && self.held.is_none() && !sequence.claimed && !sequence.palmed && !covering;
             let tap = s.tap && still;
             if self.native {
                 if still && sequence.hidden {
@@ -1424,8 +1478,16 @@ impl Gestures {
         };
         if self.sequence.is_none() {
             self.claim = Claim::None;
-            self.sequence =
-                Some(Sequence { started: time, most: 0, travelled: 0.0, clicked: false, origin: (first.x, first.y), claimed: false, hidden: false });
+            self.sequence = Some(Sequence {
+                started: time,
+                most: 0,
+                travelled: 0.0,
+                clicked: false,
+                origin: (first.x, first.y),
+                claimed: false,
+                hidden: false,
+                palmed: false,
+            });
         }
         if let Some(sequence) = self.sequence.as_mut() {
             sequence.most = sequence.most.max(u8::try_from(fingers.len()).unwrap_or(u8::MAX));
@@ -1480,40 +1542,51 @@ impl Gestures {
     }
 
     fn cover_at(&self) -> Option<u64> {
-        let covering = self.covering?;
-        self.config.cover.enabled.then(|| covering.since.saturating_add(self.config.cover.time))
+        match self.covering? {
+            Covering::Holding { since, .. } if self.config.cover.enabled => Some(since.saturating_add(self.config.cover.time)),
+            _ => None,
+        }
     }
 
     fn check_cover(&mut self, time: u64, out: &mut Vec<Event>) {
         let cover = self.config.cover;
-        let contacts = self.fingers.len();
-        let palms = self.fingers.iter().any(|finger| finger.palm);
-        let met = cover.enabled
-            && !self.locked
-            && !self.tablet
-            && self.held.is_none()
-            && self.claim != Claim::Consumed
-            && contacts >= usize::from(cover.contacts.max(LEAST_COVER))
-            && palms;
-        if !met {
-            self.covering = None;
+        if !cover.enabled || matches!(self.covering, Some(Covering::Covered | Covering::Spoiled)) || self.fingers.is_empty() {
             return;
         }
-        let count = contacts as f32;
-        let centre = (self.fingers.iter().map(|finger| finger.x).sum::<f32>() / count, self.fingers.iter().map(|finger| finger.y).sum::<f32>() / count);
-        match self.covering {
-            Some(covering) if covering.contacts == contacts && distance(centre.0 - covering.centre.0, centre.1 - covering.centre.1) <= COVER_DRIFT => {
-                if time >= covering.since.saturating_add(cover.time) {
-                    self.covering = None;
-                    self.mark_claimed();
-                    self.end_mode(time, out);
-                    self.claim = Claim::Consumed;
-                    if let Some(action) = cover.action {
-                        self.act(action, time, out);
-                    }
-                }
-            }
-            _ => self.covering = Some(Covering { since: time, contacts, centre }),
+        let typed = self.typed.is_some_and(|at| at.saturating_add(COVER_QUIET) > self.touched);
+        let pointing = self.fingers.iter().any(|finger| !finger.palm && finger.displacement() > self.config.pointer.tap_travel);
+        let late = !self.fingers.iter().any(|finger| finger.palm) && time.saturating_sub(self.touched) > COVER_LANDING;
+        let busy = self.locked || self.tablet || self.claim == Claim::Consumed;
+        if typed || pointing || late || busy {
+            self.covering = Some(Covering::Spoiled);
+            return;
+        }
+        let (width, height) = (self.surface.width, self.surface.height);
+        let inside =
+            |finger: &&Finger| (COVER_MARGIN..=width - COVER_MARGIN).contains(&finger.x0) && (COVER_MARGIN..=height - COVER_MARGIN).contains(&finger.y0);
+        let enough = self.fingers.len() >= usize::from(cover.contacts.max(1));
+        let Some(palm) = self.fingers.iter().filter(|finger| finger.palm).find(inside).copied().filter(|_| enough) else {
+            self.covering = None;
+            return;
+        };
+        let (since, id, at) = match self.covering {
+            Some(Covering::Holding { since, id, at }) => match self.fingers.iter().find(|finger| finger.id == id) {
+                Some(followed) if distance(followed.x - at.0, followed.y - at.1) <= COVER_DRIFT => (since, id, at),
+                Some(followed) => (time, id, (followed.x, followed.y)),
+                None => (since, palm.id, (palm.x, palm.y)),
+            },
+            _ => (time, palm.id, (palm.x, palm.y)),
+        };
+        if time < since.saturating_add(cover.time) {
+            self.covering = Some(Covering::Holding { since, id, at });
+            return;
+        }
+        self.covering = Some(Covering::Covered);
+        self.mark_claimed();
+        self.end_mode(time, out);
+        self.claim = Claim::Consumed;
+        if let Some(action) = cover.action {
+            self.act(action, time, out);
         }
     }
 
@@ -2323,6 +2396,45 @@ mod tests {
     }
 
     #[test]
+    fn a_rotation_around_a_finger_that_hardly_moves_still_rotates_but_a_resting_finger_means_pointing() {
+        let mut config = Config::default();
+        config.rotate.enabled = true;
+        config.rotate.action = Slider::preset("rotate").unwrap();
+        let pivot = (50.0, 33.0);
+        let turning = lifted(
+            (0..=45)
+                .map(|i| {
+                    let angle = (-90.0 + i as f32 * 3.0) * PI / 180.0;
+                    let drift = (i.min(6) as f32) * 0.2;
+                    vec![touch(1, pivot.0 + 27.0 * libm::cosf(angle), pivot.1 + 27.0 * libm::sinf(angle)), touch(2, pivot.0 - drift, pivot.1)]
+                })
+                .collect(),
+        );
+        let events = run(&mut with(config.clone()), &turning);
+        assert_eq!(pressed_keys(&events).iter().filter(|key| **key == Key::R).count(), 4, "{:?}", pressed_keys(&events));
+        assert_eq!(total(&events), (0.0, 0.0));
+        let wide = lifted(
+            (0..=60)
+                .map(|i| {
+                    let angle = (150.0 - i as f32 * 3.0) * PI / 180.0;
+                    let gap = 54.0 - (i.min(10) as f32) * 0.5;
+                    let (dx, dy) = (gap / 2.0 * libm::cosf(angle), gap / 2.0 * libm::sinf(angle));
+                    vec![touch(1, 70.0 - dx, 32.0 - dy), touch(2, 70.0 + dx, 32.0 + dy)]
+                })
+                .collect(),
+        );
+        let events = run(&mut with(config.clone()), &wide);
+        assert_eq!(pressed_keys(&events).iter().filter(|key| **key == Key::R).count(), 6, "{:?}", pressed_keys(&events));
+        assert!(pressed_keys(&events).contains(&Key::Shift));
+        assert_eq!(total(&events), (0.0, 0.0));
+        let pointing: Frames = (0..=30).map(|i| (false, vec![touch(1, 40.0, 30.0), touch(2, 70.0, 20.0 + i as f32 * 0.5)])).collect();
+        let events = run(&mut with(config), &pointing);
+        assert!(pressed_keys(&events).is_empty());
+        let (dx, dy) = total(&events);
+        assert!(dy > 50.0 && dx.abs() < 1.0, "{dx} {dy}");
+    }
+
+    #[test]
     fn a_symbol_drawn_after_arming_runs_its_action() {
         let mut config = Config::default();
         config.symbols.enabled = true;
@@ -2411,6 +2523,107 @@ mod tests {
         assert!(pressed_keys(&play(&mut with(config), &resting, START).0).is_empty());
     }
 
+    fn settling_hand() -> Frames {
+        lifted(
+            (0..150)
+                .map(|i| {
+                    let drift = (i.min(100) as f32) * 0.2;
+                    let mut hand = vec![palm(4, 64.0 + drift, 39.0 - drift / 2.0)];
+                    if i % 20 < 6 {
+                        hand.push(if i % 20 < 3 { touch(5, 112.0, 56.0) } else { palm(5, 112.0, 56.0) });
+                    }
+                    hand
+                })
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn a_hand_the_pad_reports_as_one_shifting_palm_still_covers_it() {
+        let mut config = Config::default();
+        config.cover.enabled = true;
+        let (events, _) = play(&mut with(config.clone()), &settling_hand(), START);
+        assert_eq!(pressed_keys(&events), [Key::PlayPause]);
+        assert!(clicks(&events).is_empty(), "{events:?}");
+        let handed_over = lifted(
+            (0..80)
+                .map(|i| match i {
+                    0..10 => vec![palm(4, 70.0, 35.0)],
+                    10..40 => vec![palm(4, 70.0, 35.0), palm(5, 100.0, 50.0)],
+                    _ => vec![palm(5, 100.0, 50.0)],
+                })
+                .collect(),
+        );
+        assert_eq!(pressed_keys(&play(&mut with(config.clone()), &handed_over, START).0), [Key::PlayPause]);
+        let mut late = still(30, vec![touch(1, 47.0, 50.0)]);
+        late.extend(settling_hand().into_iter().map(|(button, mut hand)| {
+            hand.push(touch(1, 47.0, 50.0));
+            (button, hand)
+        }));
+        late.push((false, vec![]));
+        assert!(pressed_keys(&play(&mut with(config.clone()), &late, START).0).is_empty());
+        let mut pressing = settling_hand();
+        for frame in &mut pressing[46..59] {
+            frame.0 = true;
+        }
+        let (events, _) = play(&mut with(config.clone()), &pressing, START);
+        assert_eq!(pressed_keys(&events), [Key::PlayPause]);
+        assert!(clicks(&events).is_empty(), "{events:?}");
+        let beside = still(150, vec![palm(1, 113.9, 71.0), touch(2, 4.0, 3.9)]);
+        assert!(pressed_keys(&play(&mut with(config.clone()), &beside, START).0).is_empty());
+        let creeping = lifted((0..150).map(|i| vec![palm(1, 112.0 - (i.min(30) as f32) * 0.4, 40.0)]).collect());
+        assert!(pressed_keys(&play(&mut with(config), &creeping, START).0).is_empty());
+    }
+
+    #[test]
+    fn fingers_of_a_covering_hand_do_not_tap() {
+        let mut config = Config::default();
+        config.cover.enabled = true;
+        let blip = |frames: core::ops::Range<usize>, i: usize| frames.contains(&i).then(|| touch(7, 108.0, 25.0));
+        let hand = lifted((0..150).map(|i| [Some(palm(4, 68.0, 33.0)), blip(10..15, i).or(blip(90..100, i))].into_iter().flatten().collect()).collect());
+        let (events, _) = play(&mut with(config.clone()), &hand, START);
+        assert_eq!(pressed_keys(&events), [Key::PlayPause]);
+        assert!(clicks(&events).is_empty(), "{events:?}");
+        let (events, _) = play(&mut with(Config::default()), &hand, START);
+        assert_eq!(clicks(&events).len(), 4, "{events:?}");
+    }
+
+    #[test]
+    fn a_palm_that_lands_within_a_second_of_typing_never_covers_even_after_typing_stops() {
+        let mut config = Config::default();
+        assert!(!config.uses_typing(false));
+        config.typing.enabled = true;
+        assert!(config.uses_typing(false) && !config.uses_typing(true));
+        config.typing.enabled = false;
+        config.cover.enabled = true;
+        assert!(config.uses_typing(false) && config.uses_typing(true));
+        let landing = START + 2_000_000;
+        for (typed, covers) in [(landing - 600_000, false), (landing - 1_100_000, true)] {
+            let mut pad = with(config.clone());
+            pad.typed(typed);
+            assert_eq!(pressed_keys(&play(&mut pad, &settling_hand(), landing).0).len(), usize::from(covers));
+            let mut native = Gestures::new(config.clone(), PAD).native();
+            native.typed(typed);
+            assert_eq!(pressed_keys(&play(&mut native, &settling_hand(), landing).0).len(), usize::from(covers));
+        }
+        let mut pad = with(config);
+        let frames = settling_hand();
+        let (_, middle) = play(&mut pad, &frames[..30], START);
+        pad.typed(middle);
+        assert!(pressed_keys(&play(&mut pad, &frames[30..], middle).0).is_empty());
+    }
+
+    #[test]
+    fn a_finger_that_the_pad_later_flags_as_a_palm_is_not_a_tap() {
+        let mut frames: Frames = (0..5).map(|_| (false, vec![touch(1, 112.0, 56.0)])).collect();
+        frames.extend((0..20).map(|_| (false, vec![palm(1, 112.0, 56.0)])));
+        frames.push((false, vec![]));
+        let (events, _) = play(&mut gestures(), &frames, START);
+        assert!(clicks(&events).is_empty(), "{events:?}");
+        let (events, _) = play(&mut gestures(), &frames[..5].iter().cloned().chain([(false, vec![])]).collect::<Frames>(), START);
+        assert_eq!(clicks(&events), [Event::Press(Button::Left), Event::Release(Button::Left)]);
+    }
+
     fn wiggle(legs: usize, frames: usize, step: f32) -> Vec<Vec<Touch>> {
         let mut wiggle = Vec::new();
         let mut x = 40.0;
@@ -2431,7 +2644,16 @@ mod tests {
         assert_eq!(pressed_keys(&events), [Key::Ctrl]);
         assert!(pressed_keys(&run(&mut with(config.clone()), &lifted(wiggle(7, 12, 0.3)))).is_empty());
         let dragging: Frames = wiggle(7, 12, 0.7).into_iter().map(|touches| (true, touches)).chain([(false, vec![])]).collect();
-        assert!(pressed_keys(&run(&mut with(config), &dragging)).is_empty());
+        assert!(pressed_keys(&run(&mut with(config.clone()), &dragging)).is_empty());
+        let circles = lifted(
+            (0..=150)
+                .map(|i| {
+                    let angle = i as f32 / 12.0 * 2.0 * PI;
+                    vec![touch(1, 58.0 + 8.0 * libm::cosf(angle), 36.0 + 8.0 * libm::sinf(angle))]
+                })
+                .collect(),
+        );
+        assert!(pressed_keys(&run(&mut with(config), &circles)).is_empty());
     }
 
     #[test]

@@ -23,7 +23,7 @@ pub use engine::Gestures;
 pub use keys::{Action, COMBO, Combo, Key, Slider, Toggle};
 pub use settings::*;
 pub use shaper::{Output, Shaper};
-pub use symbols::{POINTS, Template, normalize};
+pub use symbols::{POINTS, Recognizer, Template, normalize};
 pub use zones::{Corner, Edge};
 
 #[derive(Debug, Clone, Copy, PartialEq)]

@@ -463,7 +463,7 @@ pub struct Cover {
 
 impl Default for Cover {
     fn default() -> Self {
-        Cover { enabled: false, action: Action::parse("play-pause"), time: 500_000, contacts: 3 }
+        Cover { enabled: false, action: Action::parse("play-pause"), time: 500_000, contacts: 1 }
     }
 }
 
@@ -586,6 +586,10 @@ impl Config {
             || self.dwell.enabled
             || self.smoothing.enabled
             || self.edge_motion.enabled
+    }
+
+    pub fn uses_typing(&self, native: bool) -> bool {
+        self.cover.enabled || (self.typing.enabled && !native)
     }
 }
 

@@ -185,7 +185,7 @@ fn built_in() -> Vec<(&'static str, Vec<Stroke>)> {
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
-pub(crate) struct Recognizer {
+pub struct Recognizer {
     names: Vec<String>,
     shapes: Vec<(u16, Shape)>,
 }
