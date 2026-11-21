@@ -166,6 +166,7 @@ pub struct Gestures {
     numpad: bool,
     tablet: bool,
     pen: bool,
+    second: Option<Finger>,
     drawing: Option<u64>,
     queue: Vec<Tap>,
     queue_until: u64,
@@ -256,6 +257,7 @@ impl Gestures {
             numpad: false,
             tablet: false,
             pen: false,
+            second: None,
             drawing: None,
             queue: Vec::new(),
             queue_until: 0,
@@ -1460,11 +1462,20 @@ impl Gestures {
             self.pen = false;
         }
         self.tablet = on;
+        self.second = None;
         out.push(Event::Notice(Notice::Tablet(on)));
     }
 
     fn tablet_frame(&mut self, button: bool, time: u64, out: &mut Vec<Event>) {
         let fingers: Vec<Finger> = self.fingers.iter().copied().filter(|finger| !finger.palm).collect();
+        if let Some(second) = self.second.take() {
+            let lifted = !fingers.iter().any(|finger| finger.id == second.id);
+            let quick = time.saturating_sub(second.landed) <= self.config.pointer.tap_time;
+            if lifted && quick && second.displacement() <= self.config.pointer.tap_travel && self.claim != Claim::Consumed {
+                out.push(Event::Press(Button::Right));
+                out.push(Event::Release(Button::Right));
+            }
+        }
         let Some(first) = fingers.first().copied() else {
             if self.pen {
                 out.push(Event::PenAway);
@@ -1503,6 +1514,7 @@ impl Gestures {
         if self.claim == Claim::Consumed {
             return;
         }
+        self.second = fingers.get(1).copied();
         let down = button || self.config.tablet.draw_on_touch;
         out.push(Event::Pen { x: (first.x / self.surface.width).clamp(0.0, 1.0), y: (first.y / self.surface.height).clamp(0.0, 1.0), down });
         self.pen = true;
@@ -2674,6 +2686,30 @@ mod tests {
         let pens: Vec<Event> = events.iter().copied().filter(|e| matches!(e, Event::Pen { .. } | Event::PenAway)).collect();
         assert_eq!(pens, [Event::Pen { x: 0.5, y: 0.5, down: false }, Event::Pen { x: 0.5, y: 0.5, down: true }, Event::PenAway]);
         assert!(clicks(&events).is_empty());
+    }
+
+    #[test]
+    fn in_the_tablet_mode_a_quick_second_finger_is_a_right_click_where_the_pen_is() {
+        let mut config = Config::default();
+        config.tablet.enabled = true;
+        config.taps.four = action("tablet");
+        let hand = vec![touch(1, 30.0, 30.0), touch(2, 50.0, 30.0), touch(3, 70.0, 30.0), touch(4, 90.0, 30.0)];
+        let mut entering = still(3, hand);
+        entering.push((false, vec![]));
+        let pen = touch(5, 58.5, 36.0);
+        for (resting, clicks_expected) in [(3, 2), (40, 0)] {
+            let mut pad = with(config.clone());
+            let (_, time) = play(&mut pad, &entering, START);
+            let mut frames = still(3, vec![pen]);
+            frames.extend(still(resting, vec![pen, touch(6, 80.0, 40.0)]));
+            frames.extend(still(3, vec![pen]));
+            frames.push((false, vec![]));
+            let (events, _) = play(&mut pad, &frames, time);
+            let right: Vec<Event> = clicks(&events);
+            assert_eq!(right.len(), clicks_expected, "{events:?}");
+            assert!(right.iter().all(|event| matches!(event, Event::Press(Button::Right) | Event::Release(Button::Right))));
+            assert!(events.iter().filter(|event| matches!(event, Event::Pen { .. })).all(|event| *event == Event::Pen { x: 0.5, y: 0.5, down: false }));
+        }
     }
 
     #[test]
