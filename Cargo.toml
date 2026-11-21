@@ -1,0 +1,17 @@
+[package]
+name = "gestus"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/Redox-openDriver/gestus"
+categories = ["no-std", "hardware-support"]
+description = "Жесты тачпада без привязки к устройству и ОС: указатель, тапы, прокрутка с инерцией, свайпы, углы, рейки, символы и многое другое; каждая функция включается в настройках"
+keywords = ["touchpad", "gestures", "libinput", "no-std", "redox"]
+
+[features]
+config = ["dep:serde", "dep:toml"]
+
+[dependencies]
+libm = "0.2"
+serde = { version = "1", default-features = false, features = ["derive", "alloc"], optional = true }
+toml = { version = "1", optional = true }

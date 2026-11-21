@@ -1,0 +1,128 @@
+[pointer]
+speed = 4.0
+natural-scroll = false
+
+[inertia]
+enabled = true
+friction = 3.0
+
+[throw]
+enabled = false
+
+[taps]
+one = "left-click"
+two = "right-click"
+three = "draw"
+four = "overview"
+drag = true
+
+[corners]
+enabled = true
+size = 10.0
+hold-time = 1000
+
+[corners.top-left]
+double-tap = "toggle-touchpad"
+hold = "tablet"
+
+[corners.top-right]
+hold = "numpad"
+double-tap = "draw"
+
+[knock]
+enabled = false
+codes = { 1243 = "lock-screen" }
+
+[drag]
+enabled = true
+fingers = 3
+
+[edge-motion]
+enabled = true
+
+[swipes]
+enabled = true
+switcher = 0
+
+[swipes.four]
+up = "overview"
+left = "super+page-down"
+right = "super+page-up"
+
+[rails]
+enabled = true
+sides = "volume"
+top-bottom = "brightness"
+
+[circular]
+enabled = false
+action = "scroll"
+
+[rotate]
+enabled = true
+action = "volume"
+
+[pinch]
+enabled = true
+action = "zoom"
+
+[symbols]
+enabled = true
+
+[symbols.actions]
+circle = "calculator"
+check = "save"
+less = "back"
+greater = "forward"
+z = "undo"
+s = "print"
+c = "copy"
+v = "paste"
+l = "lock-screen"
+m = "mail"
+w = "browser"
+triangle = "files"
+square = "fullscreen"
+star = "new-tab"
+heart = "play-pause"
+infinity = "reopen-tab"
+
+[numpad]
+enabled = true
+
+[sniper]
+enabled = true
+
+[joystick]
+enabled = false
+corner = "bottom-left"
+
+[dwell]
+enabled = false
+
+[smoothing]
+enabled = false
+
+[cover]
+enabled = true
+action = "play-pause"
+
+[shake]
+enabled = true
+action = "locate"
+
+[tablet]
+enabled = true
+draw-on-touch = false
+
+[edge-swipes]
+enabled = false
+left = "back"
+right = "forward"
+
+[areas]
+enabled = false
+
+[typing]
+enabled = true
+quiet = 500
