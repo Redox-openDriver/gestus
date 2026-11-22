@@ -36,7 +36,7 @@ let mut gestures = Gestures::with_symbols(config, surface, &learned);
 | что | примеры |
 |---|---|
 | щелчок | `left-click`, `right-click`, `middle-click` |
-| переключатели | `toggle-touchpad` (выключить и включить тачпад), `numpad` (цифровой блок), `tablet` (режим планшета) |
+| переключатели | `toggle-touchpad` (выключить и включить тачпад; только на углах и в кодах стука, потому что выключенный тачпад слушает только их), `numpad` (цифровой блок), `tablet` (режим планшета) |
 | рисование символа | `draw` — следующий штрих одним пальцем распознаётся как символ |
 | клавиша | `volume-up`, `mute`, `play-pause`, `brightness-up`, `print`, `calculator`, `browser`, `files`, `lock-screen`, `f11`, `7`, `kp-plus`… |
 | сочетание | `ctrl+shift+t`, `super+page-down`, `alt+tab` — до четырёх клавиш через `+` |

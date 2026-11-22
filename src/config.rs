@@ -9,7 +9,7 @@ use serde::de::{self, Deserializer, SeqAccess, Visitor};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use crate::keys::{Action, Combo, Slider};
+use crate::keys::{Action, Combo, Slider, Toggle};
 use crate::settings::Config;
 use crate::symbols::Template;
 use crate::zones::Corner;
@@ -81,12 +81,28 @@ fn action(text: &str) -> Result<Action, String> {
     Action::parse(text).ok_or_else(|| format!("unknown action `{text}`"))
 }
 
-pub fn binding<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Action>, D::Error> {
+fn unlockable(text: &str) -> Result<Action, String> {
+    let found = action(text)?;
+    if found == Action::Toggle(Toggle::Touchpad) {
+        return Err(format!("`{text}` works only on a corner or a knock code: a switched-off touchpad listens to nothing else"));
+    }
+    Ok(found)
+}
+
+fn optional<'de, D: Deserializer<'de>>(deserializer: D, read: fn(&str) -> Result<Action, String>) -> Result<Option<Action>, D::Error> {
     let text = String::deserialize(deserializer)?;
     if text.trim() == "none" {
         return Ok(None);
     }
-    action(&text).map(Some).map_err(de::Error::custom)
+    read(&text).map(Some).map_err(de::Error::custom)
+}
+
+pub fn binding<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Action>, D::Error> {
+    optional(deserializer, unlockable)
+}
+
+pub fn corner_binding<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Action>, D::Error> {
+    optional(deserializer, action)
 }
 
 pub fn codes<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<(Vec<u8>, Action)>, D::Error> {
@@ -105,7 +121,7 @@ pub fn codes<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<(Vec<u8>,
 
 pub fn named<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<(String, Action)>, D::Error> {
     let map = BTreeMap::<String, String>::deserialize(deserializer)?;
-    map.into_iter().map(|(name, text)| Ok((name, action(&text).map_err(de::Error::custom)?))).collect()
+    map.into_iter().map(|(name, text)| Ok((name, unlockable(&text).map_err(de::Error::custom)?))).collect()
 }
 
 pub fn rows<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<Vec<Option<Combo>>>, D::Error> {
@@ -301,6 +317,11 @@ mod tests {
         let problem = parse("[pointer]\nspeed = 2.0\n\n[taps]\none = \"jump\"\n").unwrap_err();
         assert_eq!((problem.line, problem.column), (5, 7));
         assert_eq!(problem.message, "unknown action `jump`");
+        for elsewhere in ["[shake]\naction = \"toggle-touchpad\"", "[cover]\naction = \"toggle-touchpad\"", "[taps]\nthree = \"toggle-touchpad\""] {
+            let problem = parse(elsewhere).unwrap_err();
+            assert!(problem.message.contains("only on a corner or a knock code"), "{elsewhere}: {}", problem.message);
+        }
+        assert!(parse("[knock]\nenabled = true\ncodes = { 1234 = \"toggle-touchpad\" }").is_ok());
     }
 
     #[test]

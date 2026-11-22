@@ -147,11 +147,11 @@ impl Taps {
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 #[cfg_attr(feature = "config", derive(Deserialize), serde(default, deny_unknown_fields, rename_all = "kebab-case"))]
 pub struct CornerActions {
-    #[cfg_attr(feature = "config", serde(deserialize_with = "crate::config::binding"))]
+    #[cfg_attr(feature = "config", serde(deserialize_with = "crate::config::corner_binding"))]
     pub tap: Option<Action>,
-    #[cfg_attr(feature = "config", serde(deserialize_with = "crate::config::binding"))]
+    #[cfg_attr(feature = "config", serde(deserialize_with = "crate::config::corner_binding"))]
     pub double_tap: Option<Action>,
-    #[cfg_attr(feature = "config", serde(deserialize_with = "crate::config::binding"))]
+    #[cfg_attr(feature = "config", serde(deserialize_with = "crate::config::corner_binding"))]
     pub hold: Option<Action>,
 }
 
