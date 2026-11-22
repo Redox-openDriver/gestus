@@ -910,6 +910,9 @@ impl Gestures {
         let n = working_moves.len() as f32;
         let mean = (working_moves.iter().map(|step| step.0).sum::<f32>() / n, working_moves.iter().map(|step| step.1).sum::<f32>() / n);
         if pressed || count == 1 {
+            if matches!(self.mode, Mode::Swipe { .. } | Mode::Switcher { .. }) {
+                self.end_mode(time, out);
+            }
             self.enter(Mode::Pointer, time);
             self.point(largest(&working_moves), elapsed, time, 1.0, out);
         } else if count == 2 {
@@ -2348,6 +2351,21 @@ mod tests {
         assert_eq!(keys.first(), Some(&(Key::Alt, true)));
         assert_eq!(keys.last(), Some(&(Key::Alt, false)));
         assert_eq!(pressed_keys(&events).iter().filter(|key| **key == Key::Tab).count(), 3);
+    }
+
+    #[test]
+    fn a_click_during_the_window_switcher_lets_go_of_alt() {
+        let mut config = Config::default();
+        config.swipes.enabled = true;
+        config.swipes.switcher = 3;
+        let three = |i: usize| vec![touch(1, 20.0 + i as f32, 30.0), touch(2, 35.0 + i as f32, 30.0), touch(3, 50.0 + i as f32, 30.0)];
+        let mut frames: Vec<(bool, Vec<Touch>)> = (0..=20).map(|i| (false, three(i))).collect();
+        frames.extend((21..=30).map(|i| (true, three(i))));
+        frames.push((false, Vec::new()));
+        let events = run(&mut with(config), &frames);
+        let alt: Vec<bool> = events.iter().filter_map(|e| if let Event::Key { key: Key::Alt, pressed } = e { Some(*pressed) } else { None }).collect();
+        assert_eq!(alt.first(), Some(&true), "{events:?}");
+        assert_eq!(alt.last(), Some(&false), "{events:?}");
     }
 
     #[test]
