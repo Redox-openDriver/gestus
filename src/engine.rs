@@ -1394,18 +1394,7 @@ impl Gestures {
                 out.push(Event::Press(button));
                 out.push(Event::Release(button));
             }
-            Action::Toggle(Toggle::Touchpad) => self.lock(!self.locked, time, out),
-            Action::Toggle(Toggle::Numpad) => {
-                if self.config.numpad.enabled {
-                    self.numpad = !self.numpad;
-                    out.push(Event::Notice(Notice::Numpad(self.numpad)));
-                }
-            }
-            Action::Toggle(Toggle::Tablet) => {
-                if self.config.tablet.enabled {
-                    self.set_tablet(!self.tablet, time, out);
-                }
-            }
+            Action::Toggle(toggle) => self.flip(toggle, time, out),
             Action::Draw => {
                 if self.config.symbols.enabled {
                     self.drawing = Some(time.saturating_add(self.config.symbols.timeout));
@@ -1437,6 +1426,32 @@ impl Gestures {
         self.covering = None;
         self.claim = Claim::Consumed;
         self.mark_claimed();
+    }
+
+    pub fn switch(&mut self, toggle: Toggle, on: Option<bool>, time: u64) -> Vec<Event> {
+        let mut out = Vec::new();
+        self.due(time, &mut out);
+        let now = match toggle {
+            Toggle::Touchpad => !self.locked,
+            Toggle::Numpad => self.numpad,
+            Toggle::Tablet => self.tablet,
+        };
+        if on.is_none_or(|wanted| wanted != now) {
+            self.flip(toggle, time, &mut out);
+        }
+        out
+    }
+
+    fn flip(&mut self, toggle: Toggle, time: u64, out: &mut Vec<Event>) {
+        match toggle {
+            Toggle::Touchpad => self.lock(!self.locked, time, out),
+            Toggle::Numpad if self.config.numpad.enabled => {
+                self.numpad = !self.numpad;
+                out.push(Event::Notice(Notice::Numpad(self.numpad)));
+            }
+            Toggle::Tablet if self.config.tablet.enabled => self.set_tablet(!self.tablet, time, out),
+            Toggle::Numpad | Toggle::Tablet => {}
+        }
     }
 
     fn lock(&mut self, on: bool, time: u64, out: &mut Vec<Event>) {
@@ -2710,6 +2725,30 @@ mod tests {
             assert!(right.iter().all(|event| matches!(event, Event::Press(Button::Right) | Event::Release(Button::Right))));
             assert!(events.iter().filter(|event| matches!(event, Event::Pen { .. })).all(|event| *event == Event::Pen { x: 0.5, y: 0.5, down: false }));
         }
+    }
+
+    #[test]
+    fn a_switch_from_outside_turns_the_same_touchpad_lock_the_gesture_turns() {
+        let mut config = Config::default();
+        config.corners.enabled = true;
+        config.corners.top_left.double_tap = action("toggle-touchpad");
+        let mut pad = with(config);
+        assert_eq!(notices(&pad.switch(Toggle::Touchpad, None, START)), [Notice::Touchpad(false)]);
+        assert!(pad.locked());
+        assert!(pad.switch(Toggle::Touchpad, Some(false), START + 1).is_empty());
+        let (events, time) = play(&mut pad, &tap(50.0, 30.0), START + 10_000);
+        assert!(clicks(&events).is_empty(), "{events:?}");
+        let mut unlocking = tap(3.0, 3.0);
+        unlocking.extend(tap(3.0, 3.0));
+        let (events, time) = play(&mut pad, &unlocking, time + 100_000);
+        assert_eq!(notices(&events), [Notice::Touchpad(true)]);
+        assert!(!pad.locked());
+        assert!(pad.switch(Toggle::Touchpad, Some(true), time).is_empty());
+        assert_eq!(notices(&pad.switch(Toggle::Touchpad, Some(false), time)), [Notice::Touchpad(false)]);
+        assert_eq!(notices(&pad.switch(Toggle::Touchpad, None, time)), [Notice::Touchpad(true)]);
+        assert!(pad.switch(Toggle::Numpad, None, time).is_empty());
+        let (events, _) = play(&mut pad, &tap(50.0, 30.0), time + 1_000_000);
+        assert_eq!(clicks(&events), [Event::Press(Button::Left), Event::Release(Button::Left)]);
     }
 
     #[test]
