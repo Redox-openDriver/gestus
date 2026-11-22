@@ -36,7 +36,20 @@ fn problem(text: &str, error: &toml::de::Error) -> Problem {
 }
 
 pub fn parse(text: &str) -> Result<Config, Problem> {
-    toml::from_str(text).map_err(|e| problem(text, &e))
+    let config = toml::from_str(text).map_err(|e| problem(text, &e))?;
+    if let Some(at) = toml::from_str::<toml::Table>(text).ok().and_then(|table| unfinite(&toml::Value::Table(table), "")) {
+        return Err(Problem { line: 0, column: 0, message: format!("`{at}` is not a finite number") });
+    }
+    Ok(config)
+}
+
+fn unfinite(value: &toml::Value, at: &str) -> Option<String> {
+    match value {
+        toml::Value::Float(number) if !number.is_finite() => Some(at.to_string()),
+        toml::Value::Table(table) => table.iter().find_map(|(key, inner)| unfinite(inner, &if at.is_empty() { key.clone() } else { format!("{at}.{key}") })),
+        toml::Value::Array(items) => items.iter().find_map(|inner| unfinite(inner, at)),
+        _ => None,
+    }
 }
 
 #[derive(Debug)]
@@ -322,6 +335,8 @@ mod tests {
             assert!(problem.message.contains("only on a corner or a knock code"), "{elsewhere}: {}", problem.message);
         }
         assert!(parse("[knock]\nenabled = true\ncodes = { 1234 = \"toggle-touchpad\" }").is_ok());
+        assert_eq!(parse("[pointer]\nspeed = nan\n").unwrap_err().message, "`pointer.speed` is not a finite number");
+        assert!(parse("[pointer]\nspeed = inf\n").is_err());
     }
 
     #[test]

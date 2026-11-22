@@ -190,12 +190,21 @@ impl Slider {
     }
 }
 
+const MOST_STEPS: f32 = 16.0;
+
 pub fn steps(accumulated: f32, delta: f32, step: f32) -> (i32, f32) {
-    if step <= 0.0 {
+    if !step.is_finite() || step <= 0.0 {
         return (0, accumulated);
     }
     let total = accumulated + delta;
-    let whole = (total / step) as i32;
+    if !total.is_finite() {
+        return (0, 0.0);
+    }
+    let raw = total / step;
+    if raw.abs() > MOST_STEPS {
+        return ((MOST_STEPS * raw.signum()) as i32, 0.0);
+    }
+    let whole = raw as i32;
     (whole, total - whole as f32 * step)
 }
 
@@ -203,6 +212,15 @@ pub fn steps(accumulated: f32, delta: f32, step: f32) -> (i32, f32) {
 mod tests {
     use super::*;
     use alloc::vec::Vec;
+
+    #[test]
+    fn a_tiny_or_broken_step_never_floods_a_frame() {
+        assert_eq!(steps(0.0, 5.0, 1e-30), (16, 0.0));
+        assert_eq!(steps(0.0, -5.0, 1e-30), (-16, 0.0));
+        assert_eq!(steps(0.5, 2.0, 1.0), (2, 0.5));
+        assert_eq!(steps(0.0, f32::NAN, 1.0), (0, 0.0));
+        assert_eq!(steps(0.25, 1.0, f32::NAN), (0, 0.25));
+    }
 
     #[test]
     fn keys_are_found_by_name_and_alias_and_every_name_is_unique() {
